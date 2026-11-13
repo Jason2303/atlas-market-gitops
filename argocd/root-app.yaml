@@ -1,0 +1,21 @@
+# App-of-apps: the ONLY thing applied by hand (scripts/bootstrap.sh).
+# Everything under argocd/apps/ - the e-commerce app in both environments and the whole
+# monitoring stack - is then created and kept in sync by ArgoCD from this repository.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/Jason2303/atlas-market-gitops.git
+    targetRevision: main
+    path: argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

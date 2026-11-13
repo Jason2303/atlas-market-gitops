@@ -1,0 +1,53 @@
+# ArgoCD RBAC (applied by scripts/bootstrap.sh).
+#  developer        : view atlas apps, sync STAGING only (explicit deny on production)
+#  release-manager  : may sync PRODUCTION too - this click is the production approval
+#  platform         : full control of the monitoring stack (project "platform")
+#  nobody but admins creates/edits/deletes Applications by hand: they come from Git (root app)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: argocd
+data:
+  policy.default: ""          # deny by default
+  scopes: "[groups, email]"
+  policy.csv: |
+    # ---------------- developer ----------------
+    p, role:developer, applications, get,      atlas/*,             allow
+    p, role:developer, applications, sync,     atlas/atlas-staging, allow
+    p, role:developer, applications, action/*, atlas/atlas-staging, allow
+    p, role:developer, applications, sync,     atlas/atlas-production, deny
+    p, role:developer, logs,         get,      atlas/*,             allow
+    p, role:developer, projects,     get,      atlas,               allow
+    p, role:developer, applications, get,      platform/*,          allow
+
+    # ---------------- release manager (production approver) ----------------
+    p, role:release-manager, applications, get,      atlas/*,    allow
+    p, role:release-manager, applications, sync,     atlas/*,    allow
+    p, role:release-manager, applications, action/*, atlas/*,    allow
+    p, role:release-manager, logs,         get,      atlas/*,    allow
+    p, role:release-manager, projects,     get,      atlas,      allow
+    p, role:release-manager, applications, get,      platform/*, allow
+
+    # ---------------- platform team ----------------
+    p, role:platform, applications, *,   platform/*, allow
+    p, role:platform, applications, get, atlas/*,    allow
+    p, role:platform, projects,     get, *,          allow
+    p, role:platform, repositories, get, *,          allow
+    p, role:platform, clusters,     get, *,          allow
+
+    # Assignment 1 demo project lives on the same lab cluster - keep its access working
+    p, role:developer,       applications, get,  demo/*,                 allow
+    p, role:developer,       applications, sync, demo/*-staging,         allow
+    p, role:release-manager, applications, get,  demo/*,                 allow
+    p, role:release-manager, applications, sync, demo/*,                 allow
+
+    # ---------------- bindings ----------------
+    g, dev-alice,   role:developer
+    g, release-bob, role:release-manager
+    # With SSO, bind identity-provider groups instead:
+    # g, atlas:developers,       role:developer
+    # g, atlas:release-managers, role:release-manager
+    # g, atlas:platform,         role:platform

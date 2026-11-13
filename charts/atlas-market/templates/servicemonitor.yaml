@@ -1,0 +1,21 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# Prometheus scrapes /metrics on every backend Service (label metrics=true).
+# Prometheus adds namespace, service and pod labels to each series.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: atlas-market
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "atlas.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      metrics: "true"
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace }}]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}

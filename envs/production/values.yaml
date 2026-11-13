@@ -1,0 +1,57 @@
+# PRODUCTION - manual sync in ArgoCD (release manager), changed only through a promotion PR.
+# image.tag is copied from staging by the "Promote to production" workflow / scripts/promote.sh.
+image:
+  repository: atlas201
+  tag: v1.0.0
+  pullPolicy: IfNotPresent
+
+config:
+  cacheTtlSeconds: "60"
+  rateLimitPerMin: "600"
+
+storageClass:
+  create: false
+  name: standard        # on EKS: create true, name gp3 (chart default)
+
+frontend:
+  replicas: 2
+
+backend:
+  gateway:
+    replicas: 2
+    autoscaling: { enabled: false }   # on EKS with metrics-server: enabled true, 2..5
+  product-service:
+    replicas: 2
+    autoscaling: { enabled: false }
+  order-service:
+    replicas: 2
+    autoscaling: { enabled: false }
+
+backendResources:
+  requests: { cpu: 50m, memory: 96Mi }
+  limits: { cpu: 500m, memory: 256Mi }
+
+postgres:
+  storage: 2Gi
+
+ingress:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicies:
+  # true on EKS (default-deny + explicit allows, incl. the Prometheus scrape rule).
+  # Off on the local kind cluster, whose NetworkPolicy support differs from the VPC CNI.
+  enabled: false
+  ingressNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+
+loadgen:
+  enabled: false

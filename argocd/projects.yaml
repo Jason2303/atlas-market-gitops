@@ -1,0 +1,51 @@
+# Two AppProjects = two security boundaries.
+#   platform: cluster tooling (monitoring stack, ArgoCD's own app definitions). Cluster-wide rights.
+#   atlas:    the e-commerce app. Only this repo, only the two app namespaces, no cluster-scoped
+#             objects except Namespace, cannot touch RBAC/quotas.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  description: Platform tooling managed by the platform team
+  sourceRepos:
+    - https://github.com/Jason2303/atlas-market-gitops.git
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: argocd }
+    - { server: https://kubernetes.default.svc, namespace: monitoring }
+    - { server: https://kubernetes.default.svc, namespace: kube-system }   # kps: coredns/kubelet scrape Services
+  clusterResourceWhitelist:
+    - { group: "*", kind: "*" }   # CRDs, ClusterRoles, webhooks for the monitoring stack
+  orphanedResources:
+    warn: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: atlas
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  description: Atlas Market e-commerce application
+  sourceRepos:
+    - https://github.com/Jason2303/atlas-market-gitops.git
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: atlas-staging }
+    - { server: https://kubernetes.default.svc, namespace: atlas-production }
+  clusterResourceWhitelist:
+    - { group: "", kind: Namespace }
+  namespaceResourceBlacklist:
+    - { group: "", kind: ResourceQuota }
+    - { group: "", kind: LimitRange }
+    - { group: rbac.authorization.k8s.io, kind: "*" }
+  orphanedResources:
+    warn: true
+  roles:
+    - name: ci-readonly
+      description: Read-only token for pipelines to query sync status
+      policies:
+        - p, proj:atlas:ci-readonly, applications, get, atlas/*, allow

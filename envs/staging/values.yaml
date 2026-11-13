@@ -1,0 +1,51 @@
+# STAGING - auto-synced by ArgoCD.
+# image.tag is written by the app repo's CI on every push to main. Do not edit by hand.
+image:
+  repository: atlas201
+  tag: v1.0.0
+  pullPolicy: IfNotPresent
+
+config:
+  cacheTtlSeconds: "30"
+  rateLimitPerMin: "600"
+
+# Local kind cluster: default "standard" StorageClass, no EBS
+storageClass:
+  create: false
+  name: standard
+
+frontend:
+  replicas: 1
+
+backend:
+  gateway:
+    replicas: 1
+    autoscaling: { enabled: false }
+  product-service:
+    replicas: 1
+    autoscaling: { enabled: false }
+  order-service:
+    replicas: 1
+    autoscaling: { enabled: false }
+
+postgres:
+  storage: 1Gi
+
+ingress:
+  enabled: false        # port-forward the frontend; no ingress controller on kind
+
+podDisruptionBudget:
+  enabled: false        # single replicas in staging
+
+networkPolicies:
+  enabled: false
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+
+loadgen:
+  enabled: true
+  requestsPerSecond: 2
+  orderEverySeconds: 20

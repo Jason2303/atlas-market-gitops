@@ -1,0 +1,56 @@
+name: validate
+
+# Every change to the desired state is checked before ArgoCD ever sees it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    name: helm render + schema (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        env: [staging, production]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | sudo tar xz -C /usr/local/bin kubeconform
+      - name: Render chart with environment values
+        run: helm template atlas-market charts/atlas-market -n atlas-${{ matrix.env }} -f envs/${{ matrix.env }}/values.yaml > rendered.yaml
+      - name: Schema validation (CRDs skipped)
+        run: kubeconform -strict -summary -ignore-missing-schemas rendered.yaml
+      - name: Policy - no plain Secrets in Git
+        run: |
+          if yq -e 'select(.kind == "Secret")' rendered.yaml >/dev/null 2>&1; then
+            echo "::error::Plain Secret rendered - secrets must be created out of band or sealed"; exit 1; fi
+      - name: Policy - immutable image tag
+        run: |
+          tag=$(yq '.image.tag' envs/${{ matrix.env }}/values.yaml)
+          [[ "$tag" =~ ^(sha-[0-9a-f]{7}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::Mutable tag '$tag'"; exit 1; }
+
+  monitoring:
+    name: alert rules, routing, dashboards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install promtool + amtool
+        run: |
+          curl -sSL https://github.com/prometheus/prometheus/releases/download/v2.55.1/prometheus-2.55.1.linux-amd64.tar.gz | tar xz
+          curl -sSL https://github.com/prometheus/alertmanager/releases/download/v0.28.1/alertmanager-0.28.1.linux-amd64.tar.gz | tar xz
+          sudo cp prometheus-*/promtool alertmanager-*/amtool /usr/local/bin/
+      - name: Unit-test alert rules and check routing
+        run: ./scripts/test-alerts.sh
+      - name: Dashboards are valid JSON and up to date with the generator
+        run: |
+          python3 scripts/build_dashboards.py
+          git diff --exit-code platform/monitoring-config/dashboards/
+      - name: Kustomize build of monitoring-config
+        run: kubectl kustomize platform/monitoring-config > /dev/null

@@ -1,0 +1,5 @@
+# Production values, ArgoCD config and alerting need the owners' review
+*                    @Jason2303
+/envs/production/    @Jason2303
+/argocd/             @Jason2303
+/platform/           @Jason2303

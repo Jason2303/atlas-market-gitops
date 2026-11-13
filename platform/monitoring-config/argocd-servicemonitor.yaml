@@ -1,0 +1,16 @@
+# Scrape ArgoCD's application-controller metrics (argocd_app_info: sync + health of every app),
+# so GitOps problems (staging stuck OutOfSync, Degraded apps) alert like any other failure.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-application-controller
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [argocd]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-metrics
+  endpoints:
+    - port: metrics
+      interval: 30s

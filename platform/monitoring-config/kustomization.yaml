@@ -1,0 +1,24 @@
+# Deployed by ArgoCD (argocd/apps/monitoring-config.yaml) into the monitoring namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources:
+  - alert-rules.yaml
+  - argocd-servicemonitor.yaml
+  - alert-sink.yaml
+# Dashboards: the Grafana sidecar loads every ConfigMap labelled grafana_dashboard=1 into folder "Atlas"
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: Atlas
+configMapGenerator:
+  - name: dashboard-atlas-service-overview
+    files: [dashboards/service-overview.json]
+  - name: dashboard-atlas-infrastructure
+    files: [dashboards/infrastructure.json]
+  - name: dashboard-atlas-logs
+    files: [dashboards/logs.json]
+  - name: dashboard-atlas-slo
+    files: [dashboards/slo.json]

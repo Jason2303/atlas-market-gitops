@@ -1,0 +1,66 @@
+# Grafana Alloy: tails every pod's logs through the Kubernetes API and ships them to Loki.
+# Deployed by ArgoCD: argocd/apps/monitoring-alloy.yaml
+controller:
+  type: deployment      # loki.source.kubernetes tails via the API: one replica covers the cluster
+  replicas: 1
+
+alloy:
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+  configMap:
+    content: |-
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
+      // Kubernetes metadata -> low-cardinality Loki labels
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.pods.receiver]
+      }
+
+      // Atlas services log JSON: {time, level, service, msg, trace_id, span_id, ...}
+      // level + service become labels; trace_id is structured metadata (high cardinality).
+      loki.process "pods" {
+        stage.json {
+          expressions = { level = "level", service = "service", trace_id = "trace_id" }
+        }
+        stage.labels {
+          values = { level = "", service = "" }
+        }
+        stage.structured_metadata {
+          values = { trace_id = "" }
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc:3100/loki/api/v1/push"
+        }
+      }
+
+serviceMonitor:
+  enabled: true

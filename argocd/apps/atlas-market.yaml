@@ -1,0 +1,68 @@
+# One definition -> two Applications: atlas-staging (auto) and atlas-production (manual).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: atlas-market
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # after the monitoring stack (ServiceMonitor CRD)
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  syncPolicy:
+    preserveResourcesOnDeletion: true   # deleting the AppSet never deletes production
+  generators:
+    - list:
+        elements:
+          - env: staging
+            autoSync: true
+          - env: production
+            autoSync: false
+  template:
+    metadata:
+      name: "atlas-{{.env}}"
+      labels:
+        app.kubernetes.io/part-of: atlas-market
+        environment: "{{.env}}"
+    spec:
+      project: atlas
+      source:
+        repoURL: https://github.com/Jason2303/atlas-market-gitops.git
+        targetRevision: main
+        path: charts/atlas-market
+        helm:
+          releaseName: atlas-market
+          valueFiles:
+            - "../../envs/{{.env}}/values.yaml"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "atlas-{{.env}}"
+      revisionHistoryLimit: 10
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true
+          - PruneLast=true
+          - SkipDryRunOnMissingResource=true   # ServiceMonitor CRD may arrive a moment later
+        managedNamespaceMetadata:
+          labels:
+            pod-security.kubernetes.io/enforce: restricted
+            environment: "{{.env}}"
+  # Staging: automated + prune + self-heal. Production: no `automated` block -> manual Sync.
+  templatePatch: |
+    {{- if .autoSync }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        retry:
+          limit: 10
+          backoff:
+            duration: 15s
+            factor: 2
+            maxDuration: 5m
+    {{- else }}
+    metadata:
+      labels:
+        sync-mode: manual
+    {{- end }}

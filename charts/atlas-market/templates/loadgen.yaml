@@ -1,0 +1,51 @@
+{{- if .Values.loadgen.enabled }}
+# Synthetic shoppers: browse the catalogue and place a small order now and then.
+# Reuses the gateway image (it already contains Node.js), so no extra image to trust.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: loadgen
+    tier: test
+    {{- include "atlas.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen
+  template:
+    metadata:
+      labels:
+        app: loadgen
+        tier: test
+    spec:
+      securityContext:
+        {{- include "atlas.podSecurity" (dict "uid" 10001) | nindent 8 }}
+      containers:
+        - name: loadgen
+          image: "{{ .Values.image.repository }}/shop-gateway:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - { name: TARGET, value: "http://gateway:{{ .Values.backend.gateway.port }}" }
+            - { name: RPS, value: {{ .Values.loadgen.requestsPerSecond | quote }} }
+            - { name: ORDER_EVERY_S, value: {{ .Values.loadgen.orderEverySeconds | quote }} }
+          command: ["node", "-e"]
+          args:
+            - |
+              const T = process.env.TARGET, rps = Number(process.env.RPS), every = Number(process.env.ORDER_EVERY_S) * 1000;
+              const get = (p) => fetch(T + p).then((r) => r.text()).catch(() => {});
+              setInterval(() => get(Math.random() < 0.6 ? '/api/products' : '/api/products/' + (1 + Math.floor(Math.random() * 12))), 1000 / rps);
+              setInterval(() => get('/api/orders?limit=5'), 5000);
+              setInterval(() => fetch(T + '/api/orders', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ customer_name: 'Load Test', customer_email: 'loadgen@example.com',
+                  items: [{ product_id: 1 + Math.floor(Math.random() * 12), quantity: 1 }] }),
+              }).then((r) => console.log(JSON.stringify({ level: 'info', service: 'loadgen', msg: 'order', status: r.status }))).catch(() => {}), every);
+          resources:
+            requests: { cpu: 10m, memory: 48Mi }
+            limits: { cpu: 100m, memory: 96Mi }
+          securityContext:
+            {{- include "atlas.containerSecurity" (dict "readOnly" true) | nindent 12 }}
+{{- end }}

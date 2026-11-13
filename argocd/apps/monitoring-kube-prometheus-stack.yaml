@@ -1,0 +1,36 @@
+# Metrics + alerting + dashboards: Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: platform
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: "93.*"
+      helm:
+        releaseName: kps
+        valueFiles:
+          - $values/platform/monitoring/kube-prometheus-stack.yaml
+    - repoURL: https://github.com/Jason2303/atlas-market-gitops.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true              # large CRDs exceed the client-side annotation limit
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff: { duration: 15s, factor: 2, maxDuration: 5m }

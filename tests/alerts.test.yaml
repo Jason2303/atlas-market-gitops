@@ -1,0 +1,208 @@
+# Unit tests for platform/monitoring-config/alert-rules.yaml
+# Run: ./scripts/test-alerts.sh   (no cluster needed)
+rule_files:
+  - rules.generated.yaml
+evaluation_interval: 1m
+
+tests:
+  # HighErrorRate: gateway in production returns ~14% 5xx; order-service healthy
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="atlas-production", service="gateway", route="/api/orders", status="201"}'
+        values: '0+60x15'
+      - series: 'http_requests_total{namespace="atlas-production", service="gateway", route="/api/orders", status="502"}'
+        values: '0+10x15'
+      - series: 'http_requests_total{namespace="atlas-production", service="order-service", route="/orders", status="201"}'
+        values: '0+60x15'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: atlas-production, service: gateway }
+            exp_annotations:
+              summary: "High error rate on gateway (atlas-production)"
+              description: "gateway is returning 14.29% 5xx responses (threshold 5%) for more than 5 minutes."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/high-error-rate.md
+
+  # HighLatencyP99
+  - interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{namespace="atlas-staging", service="product-service", le="1"}'
+        values: '0+10x15'
+      - series: 'http_request_duration_seconds_bucket{namespace="atlas-staging", service="product-service", le="2.5"}'
+        values: '0+100x15'
+      - series: 'http_request_duration_seconds_bucket{namespace="atlas-staging", service="product-service", le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighLatencyP99
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: atlas-staging, service: product-service }
+            exp_annotations:
+              summary: "High p99 latency on product-service (atlas-staging)"
+              description: "p99 latency of product-service is 2.483s (threshold 1s) for more than 5 minutes."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/high-latency.md
+
+  # ServiceDown
+  - interval: 1m
+    input_series:
+      - series: 'up{namespace="atlas-production", service="order-service", pod="order-service-abc", job="order-service"}'
+        values: '1 1 0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: atlas-production, service: order-service, pod: order-service-abc, job: order-service }
+            exp_annotations:
+              summary: "order-service pod order-service-abc is down (atlas-production)"
+              description: "Prometheus has not been able to scrape order-service-abc for more than 2 minutes."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/service-down.md
+
+  # DatabaseDown + RedisDown
+  - interval: 1m
+    input_series:
+      - series: 'kube_statefulset_status_replicas_ready{namespace="atlas-production", statefulset="postgres"}'
+        values: '1 1 0x10'
+      - series: 'kube_deployment_status_replicas_available{namespace="atlas-production", deployment="redis"}'
+        values: '1 0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DatabaseDown
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: atlas-production, statefulset: postgres }
+            exp_annotations:
+              summary: "Postgres is down in atlas-production"
+              description: "The postgres StatefulSet has had no ready replica for more than 2 minutes. Orders and catalogue reads are failing."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/database-down.md
+      - eval_time: 8m
+        alertname: RedisDown
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: atlas-production, deployment: redis }
+            exp_annotations:
+              summary: "Redis is down in atlas-production"
+              description: "No Redis replica for 5 minutes. The shop still works (cache and rate limiting fail open) but Postgres load rises and rate limiting is off."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/redis-down.md
+
+  # OrderFailuresHigh (business): 20% of checkouts fail; out-of-stock rejections are ignored
+  - interval: 1m
+    input_series:
+      - series: 'shop_orders_total{namespace="atlas-production", service="order-service", pod="o1", result="placed"}'
+        values: '0+8x30'
+      - series: 'shop_orders_total{namespace="atlas-production", service="order-service", pod="o1", result="failed"}'
+        values: '0+2x30'
+      - series: 'shop_orders_total{namespace="atlas-production", service="order-service", pod="o1", result="rejected"}'
+        values: '0+50x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OrderFailuresHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: atlas-production }
+            exp_annotations:
+              summary: "Orders are failing in atlas-production"
+              description: "20% of checkout attempts failed on our side over 10 minutes (out-of-stock rejections excluded)."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/order-failures.md
+
+  # LowStock (info): two product-service replicas report the same SKU -> one alert
+  - interval: 1m
+    input_series:
+      - series: 'product_stock_units{namespace="atlas-production", pod="p1", sku="OUT-004", category="outdoor"}'
+        values: '3x15'
+      - series: 'product_stock_units{namespace="atlas-production", pod="p2", sku="OUT-004", category="outdoor"}'
+        values: '3x15'
+      - series: 'product_stock_units{namespace="atlas-production", pod="p1", sku="KIT-001", category="kitchen"}'
+        values: '40x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: LowStock
+        exp_alerts:
+          - exp_labels: { severity: info, namespace: atlas-production, sku: OUT-004 }
+            exp_annotations:
+              summary: "Low stock: OUT-004 (atlas-production)"
+              description: "Only 3 units of OUT-004 left. Restock before orders start being rejected."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/low-stock.md
+
+  # PodCrashLooping
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="atlas-staging", pod="gateway-7d9f", container="gateway"}'
+        values: '0 1 2 3 4 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PodCrashLooping
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: atlas-staging, pod: gateway-7d9f, container: gateway }
+            exp_annotations:
+              summary: "Pod atlas-staging/gateway-7d9f is crash looping"
+              description: "Container gateway restarted 5 times in the last hour (threshold 3)."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/pod-crashlooping.md
+
+  # NodeNotReady
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_status_condition{node="argo-lab-control-plane", condition="Ready", status="true"}'
+        values: '1 1 0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NodeNotReady
+        exp_alerts:
+          - exp_labels: { severity: critical, node: argo-lab-control-plane, condition: Ready, status: "true" }
+            exp_annotations:
+              summary: "Node argo-lab-control-plane is not ready"
+              description: "Node argo-lab-control-plane has been NotReady/Unknown for more than 5 minutes."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/node-not-ready.md
+
+  # DiskSpaceLow
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="node1", mountpoint="/", fstype="ext4"}'
+        values: '8x10'
+      - series: 'node_filesystem_size_bytes{instance="node1", mountpoint="/", fstype="ext4"}'
+        values: '100x10'
+      - series: 'node_filesystem_readonly{instance="node1", mountpoint="/", fstype="ext4"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: DiskSpaceLow
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: node1, mountpoint: /, fstype: ext4 }
+            exp_annotations:
+              summary: "Low disk space on node1 /"
+              description: "Only 8% free on / (threshold 10%)."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/disk-space-low.md
+
+  # GitOps: staging stuck OutOfSync; production OutOfSync is expected (manual) and must NOT alert
+  - interval: 1m
+    input_series:
+      - series: 'argocd_app_info{namespace="argocd", name="atlas-staging", project="atlas", sync_status="OutOfSync", health_status="Healthy"}'
+        values: '1x20'
+      - series: 'argocd_app_info{namespace="argocd", name="atlas-production", project="atlas", sync_status="OutOfSync", health_status="Healthy"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: StagingOutOfSync
+        exp_alerts:
+          - exp_labels: { severity: warning, namespace: argocd, name: atlas-staging, project: atlas, sync_status: OutOfSync, health_status: Healthy }
+            exp_annotations:
+              summary: "atlas-staging has been OutOfSync for 15 minutes"
+              description: "Staging auto-syncs, so it should never stay out of sync. A sync is failing or self-heal is fighting a manual change."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/argocd-sync.md
+
+  # SLO fast burn: 50% errors on order-service for over an hour
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="atlas-production", service="order-service", status="201"}'
+        values: '0+60x80'
+      - series: 'http_requests_total{namespace="atlas-production", service="order-service", status="503"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: SLOErrorBudgetBurnFast
+        exp_alerts:
+          - exp_labels: { severity: critical, namespace: atlas-production, service: order-service }
+            exp_annotations:
+              summary: "order-service (atlas-production) is burning its error budget 14x too fast"
+              description: "At this rate the 30-day error budget is gone in about 2 days."
+              runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/slo-burn-rate.md

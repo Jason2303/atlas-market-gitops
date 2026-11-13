@@ -1,0 +1,183 @@
+# kube-prometheus-stack values (deployed by ArgoCD: argocd/apps/monitoring-kube-prometheus-stack.yaml)
+fullnameOverride: kps
+
+# ------------------------------------------------------------- kind / ArgoCD
+# Control-plane components bind to localhost on kind: scraping them only produces false alerts.
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+
+# The operator's admission webhook relies on Helm hook Jobs that patch certificates,
+# which fight with ArgoCD's diffing. Rules are validated in CI with promtool instead.
+prometheusOperator:
+  admissionWebhooks:
+    enabled: false
+  tls:
+    enabled: false
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 256Mi }
+
+# ---------------------------------------------------------------- Prometheus
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    retentionSize: 3GB
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    # Discover ServiceMonitors / PrometheusRules in every namespace (app namespaces included)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { cpu: "1", memory: 1Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 4Gi } }
+    # RBAC: dedicated ServiceAccount with a read-only ClusterRole (get/list/watch only)
+  service:
+    type: ClusterIP
+
+# -------------------------------------------------------------- Alertmanager
+alertmanager:
+  alertmanagerSpec:
+    secrets: [alertmanager-slack]    # created by scripts/bootstrap.sh, never stored in Git
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { cpu: 100m, memory: 128Mi }
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: slack-warning
+      group_by: [alertname, namespace, service]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: "null"
+          matchers: [alertname =~ "Watchdog|InfoInhibitor"]
+        # 1) Every real notification is also written to the alert-sink audit log
+        #    (visible in Loki / kubectl logs) - proof of delivery without external services.
+        - receiver: alert-sink
+          matchers: [severity =~ "critical|warning|info"]
+          continue: true
+        # 2) Staging never pages anyone: all staging alerts go to one low-noise channel
+        - receiver: slack-staging
+          matchers: [namespace = "atlas-staging"]
+        # 3) Everything else (production + platform) routed by severity
+        - receiver: slack-critical
+          matchers: [severity = "critical"]
+          group_wait: 10s
+          repeat_interval: 1h
+        - receiver: slack-warning
+          matchers: [severity = "warning"]
+        - receiver: slack-info
+          matchers: [severity = "info"]
+          repeat_interval: 24h
+    inhibit_rules:
+      - source_matchers: [severity = "critical"]
+        target_matchers: [severity = "warning"]
+        equal: [alertname, namespace, service]
+      - source_matchers: [alertname = "SLOErrorBudgetBurnFast"]
+        target_matchers: [alertname = "SLOErrorBudgetBurnSlow"]
+        equal: [namespace, service]
+      # Postgres down explains every order/product error in that environment
+      - source_matchers: [alertname = "DatabaseDown"]
+        target_matchers: [alertname =~ "HighErrorRate|ServiceDown|OrderFailuresHigh"]
+        equal: [namespace]
+    receivers:
+      - name: "null"
+      - name: alert-sink
+        webhook_configs:
+          - url: http://alert-sink.monitoring.svc:8080/alerts
+            send_resolved: true
+      - name: slack-critical
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-critical"
+            send_resolved: true
+            title: '{{ if eq .Status "firing" }}:red_circle:{{ else }}:white_check_mark:{{ end }} [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} ({{ .CommonLabels.namespace }})'
+            text: >-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              *Runbook:* {{ .Annotations.runbook_url }}
+              {{ end }}
+      - name: slack-warning
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-warning"
+            send_resolved: true
+            title: ':warning: [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} ({{ .CommonLabels.namespace }})'
+            text: >-
+              {{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.runbook_url }}
+              {{ end }}
+      - name: slack-staging
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-staging"
+            send_resolved: true
+            title: '[staging][{{ .CommonLabels.severity }}] {{ .CommonLabels.alertname }}'
+            text: '{{ range .Alerts }}{{ .Annotations.summary }} - {{ .Annotations.runbook_url }}{{ end }}'
+      - name: slack-info
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#alerts-info"
+            send_resolved: false
+            title: ':information_source: {{ .CommonLabels.alertname }}'
+            text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+# ------------------------------------------------------------------- Grafana
+grafana:
+  admin:
+    existingSecret: grafana-admin     # random password created by scripts/bootstrap.sh
+    userKey: admin-user
+    passwordKey: admin-password
+  grafana.ini:
+    auth.anonymous: { enabled: false }
+    users: { allow_sign_up: false }
+    security: { disable_gravatar: true, cookie_samesite: strict }
+    analytics: { reporting_enabled: false, check_for_updates: false }
+  persistence:
+    enabled: true
+    size: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc:3100
+      jsonData:
+        maxLines: 1000
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 24Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 128Mi }

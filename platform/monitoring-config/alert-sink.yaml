@@ -1,0 +1,105 @@
+# alert-sink: an Alertmanager webhook receiver that writes every notification it gets
+# as one JSON log line. It is the in-cluster proof that alerts are delivered (and an audit
+# trail in Loki), independent of Slack being configured.
+#   kubectl -n monitoring logs deploy/alert-sink -f
+#   Loki: {namespace="monitoring", app="alert-sink"}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-sink
+  namespace: monitoring
+data:
+  sink.py: |
+    import datetime, http.server, json
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            payload = json.loads(raw or b"{}")
+            for alert in payload.get("alerts", []):
+                labels, notes = alert.get("labels", {}), alert.get("annotations", {})
+                print(json.dumps({
+                    "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "level": "warn" if alert.get("status") == "firing" else "info",
+                    "service": "alert-sink",
+                    "msg": "alert notification",
+                    "status": alert.get("status"),
+                    "alertname": labels.get("alertname"),
+                    "severity": labels.get("severity"),
+                    "alert_namespace": labels.get("namespace"),
+                    "summary": notes.get("summary"),
+                    "runbook_url": notes.get("runbook_url"),
+                }), flush=True)
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):  # health probe
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):  # silence default access log
+            pass
+
+    http.server.ThreadingHTTPServer(("", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: monitoring
+  labels:
+    app: alert-sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-sink
+  template:
+    metadata:
+      labels:
+        app: alert-sink
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alert-sink
+          image: python:3.12-alpine
+          command: ["python", "/app/sink.py"]
+          env:
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 5m, memory: 24Mi }
+            limits: { cpu: 50m, memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: app, mountPath: /app }
+      volumes:
+        - name: app
+          configMap:
+            name: alert-sink
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-sink
+  namespace: monitoring
+  labels:
+    app: alert-sink
+spec:
+  selector:
+    app: alert-sink
+  ports:
+    - { name: http, port: 8080, targetPort: http }

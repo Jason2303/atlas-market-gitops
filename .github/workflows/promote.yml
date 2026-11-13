@@ -1,0 +1,47 @@
+name: promote to production
+
+# Gate 1: the `production` GitHub Environment requires a reviewer before this job runs.
+# Gate 2: the PR it opens needs CODEOWNERS approval (branch protection on main).
+# Gate 3: atlas-production is manual-sync: a release manager reviews the diff in ArgoCD and clicks Sync.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to promote (blank = what staging runs now)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: t
+        env:
+          INPUT_TAG: ${{ inputs.tag }}     # via env: never interpolated into the script
+        run: |
+          TAG="${INPUT_TAG:-$(yq '.image.tag' envs/staging/values.yaml)}"
+          [[ "$TAG" =~ ^(sha-[0-9a-f]{7}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::Refusing tag '$TAG'"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Update production values
+        run: yq -i '.image.tag = "${{ steps.t.outputs.tag }}"' envs/production/values.yaml
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: promote/production-${{ steps.t.outputs.tag }}
+          commit-message: "promote(production): atlas-market ${{ steps.t.outputs.tag }}"
+          title: "promote(production): atlas-market ${{ steps.t.outputs.tag }}"
+          body: |
+            Promotes `${{ steps.t.outputs.tag }}` (running and healthy in **staging**) to **production**.
+
+            After merge, ArgoCD shows `atlas-production` **OutOfSync**. A release manager reviews
+            *App Diff* in ArgoCD and clicks **Sync**.
+
+            Requested by @${{ github.actor }}
+          labels: promotion, production

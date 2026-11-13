@@ -1,0 +1,2 @@
+tests/*.generated.yaml
+__pycache__/

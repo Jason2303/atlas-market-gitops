@@ -1,0 +1,202 @@
+# Atlas Market alerting. Every alert: severity label (critical/warning/info),
+# summary + description annotations, runbook_url. Routing: platform/monitoring/kube-prometheus-stack.yaml
+# Unit tests: tests/alerts.test.yaml (scripts/test-alerts.sh)
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: atlas-market-rules
+  namespace: monitoring
+spec:
+  groups:
+    # ---------------------------------------------------------------- recording
+    - name: atlas-slo-recording
+      interval: 30s
+      rules:
+        - record: slo:sli_error:ratio_rate5m
+          expr: sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*", status=~"5.."}[5m])) / sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*"}[5m]))
+        - record: slo:sli_error:ratio_rate30m
+          expr: sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*", status=~"5.."}[30m])) / sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*"}[30m]))
+        - record: slo:sli_error:ratio_rate1h
+          expr: sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*", status=~"5.."}[1h])) / sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*"}[1h]))
+        - record: slo:sli_error:ratio_rate6h
+          expr: sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*", status=~"5.."}[6h])) / sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*"}[6h]))
+
+    # ------------------------------------------------------------- application
+    - name: atlas-application
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*", status=~"5.."}[5m]))
+            /
+              sum by (namespace, service) (rate(http_requests_total{namespace=~"atlas-.*"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High error rate on {{ $labels.service }} ({{ $labels.namespace }})"
+            description: "{{ $labels.service }} is returning {{ $value | humanizePercentage }} 5xx responses (threshold 5%) for more than 5 minutes."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/high-error-rate.md
+
+        - alert: HighLatencyP99
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, service, le) (rate(http_request_duration_seconds_bucket{namespace=~"atlas-.*"}[5m]))
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High p99 latency on {{ $labels.service }} ({{ $labels.namespace }})"
+            description: "p99 latency of {{ $labels.service }} is {{ $value | humanizeDuration }} (threshold 1s) for more than 5 minutes."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/high-latency.md
+
+        - alert: ServiceDown
+          expr: up{namespace=~"atlas-.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.service }} pod {{ $labels.pod }} is down ({{ $labels.namespace }})"
+            description: "Prometheus has not been able to scrape {{ $labels.pod }} for more than 2 minutes."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/service-down.md
+
+    # -------------------------------------------------------------- data tier
+    - name: atlas-data
+      rules:
+        - alert: DatabaseDown
+          expr: kube_statefulset_status_replicas_ready{namespace=~"atlas-.*", statefulset="postgres"} < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres is down in {{ $labels.namespace }}"
+            description: "The postgres StatefulSet has had no ready replica for more than 2 minutes. Orders and catalogue reads are failing."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/database-down.md
+
+        - alert: RedisDown
+          expr: kube_deployment_status_replicas_available{namespace=~"atlas-.*", deployment="redis"} < 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Redis is down in {{ $labels.namespace }}"
+            description: "No Redis replica for 5 minutes. The shop still works (cache and rate limiting fail open) but Postgres load rises and rate limiting is off."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/redis-down.md
+
+    # ---------------------------------------------------------------- business
+    - name: atlas-business
+      rules:
+        - alert: OrderFailuresHigh
+          expr: |
+            sum by (namespace) (rate(shop_orders_total{result="failed"}[10m]))
+            /
+            sum by (namespace) (rate(shop_orders_total{result=~"placed|failed"}[10m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Orders are failing in {{ $labels.namespace }}"
+            description: "{{ $value | humanizePercentage }} of checkout attempts failed on our side over 10 minutes (out-of-stock rejections excluded)."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/order-failures.md
+
+        - alert: LowStock
+          expr: min by (namespace, sku) (product_stock_units{namespace=~"atlas-.*"}) < 5
+          for: 10m
+          labels:
+            severity: info
+          annotations:
+            summary: "Low stock: {{ $labels.sku }} ({{ $labels.namespace }})"
+            description: "Only {{ $value }} units of {{ $labels.sku }} left. Restock before orders start being rejected."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/low-stock.md
+
+    # ---------------------------------------------------------------- platform
+    - name: atlas-platform
+      rules:
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total[1h]) > 3
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+            description: "Container {{ $labels.container }} restarted {{ $value | printf \"%.0f\" }} times in the last hour (threshold 3)."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/pod-crashlooping.md
+
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is not ready"
+            description: "Node {{ $labels.node }} has been NotReady/Unknown for more than 5 minutes."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/node-not-ready.md
+
+        - alert: DiskSpaceLow
+          expr: |
+            (
+              node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|nsfs"}
+            ) < 0.10
+            and node_filesystem_readonly == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Low disk space on {{ $labels.instance }} {{ $labels.mountpoint }}"
+            description: "Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }} (threshold 10%)."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/disk-space-low.md
+
+    # ------------------------------------------------------------------ GitOps
+    - name: atlas-gitops
+      rules:
+        - alert: StagingOutOfSync
+          expr: argocd_app_info{name="atlas-staging", sync_status!="Synced"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "atlas-staging has been {{ $labels.sync_status }} for 15 minutes"
+            description: "Staging auto-syncs, so it should never stay out of sync. A sync is failing or self-heal is fighting a manual change."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/argocd-sync.md
+
+        - alert: ArgoAppDegraded
+          expr: argocd_app_info{health_status="Degraded"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ArgoCD application {{ $labels.name }} is Degraded"
+            description: "One or more resources of {{ $labels.name }} are unhealthy (failed rollout, crash loop, failed Job)."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/argocd-sync.md
+
+    # --------------------------------------------------------------------- SLO
+    # SLO: 99.5% of requests succeed (30 days) -> error budget 0.5%.
+    - name: atlas-slo
+      rules:
+        - alert: SLOErrorBudgetBurnFast
+          expr: |
+            slo:sli_error:ratio_rate1h > (14.4 * 0.005)
+            and
+            slo:sli_error:ratio_rate5m > (14.4 * 0.005)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.service }} ({{ $labels.namespace }}) is burning its error budget 14x too fast"
+            description: "At this rate the 30-day error budget is gone in about 2 days."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/slo-burn-rate.md
+        - alert: SLOErrorBudgetBurnSlow
+          expr: |
+            slo:sli_error:ratio_rate6h > (6 * 0.005)
+            and
+            slo:sli_error:ratio_rate30m > (6 * 0.005)
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.service }} ({{ $labels.namespace }}) is steadily burning its error budget"
+            description: "Sustained error rate is 6x the SLO allowance; the 30-day budget runs out in about 5 days."
+            runbook_url: https://github.com/Jason2303/atlas-market-gitops/blob/main/runbooks/slo-burn-rate.md
