@@ -268,3 +268,10 @@ See [`docs/screenshots/`](docs/screenshots/).
 - Verified in CI instead of live screenshots: alert behaviour (11 promtool scenarios: each alert fires with the right labels and annotations), Alertmanager routing (`amtool` route tests), dashboards (JSON regenerated and validated), and chart rendering for both environments (`helm template` + kubeconform).
 - Verified locally: all three services against real Postgres and Redis. One order produced log lines with the same trace_id in gateway, order-service and product-service, and moved the business metrics.
 - Next step: run on EKS (Terraform in the app repo, 2 x t3.medium) or a larger workstation, where the platform fits.
+
+## 10. Evidence notes and known limitations
+- Live run on a single kind node on a 7 GB laptop (Docker capped at 5 GB). Kubernetes, ArgoCD, the full monitoring stack and two environments exceed that machine: the kube-prometheus-stack chart repeatedly timed out in ArgoCD's repo-server, and the API server became unresponsive under load.
+- Verified live: CI pipeline (lint, test, Trivy, build, push, config-repo update), ArgoCD app-of-apps with staging auto-sync, Loki + Alloy and monitoring-config synced by ArgoCD.
+- Verified in CI instead of live screenshots: alert behaviour (11 promtool scenarios: each alert fires with the right labels and annotations), Alertmanager routing (`amtool` route tests), dashboards (JSON regenerated and validated), and chart rendering for both environments (`helm template` + kubeconform).
+- Verified locally: all three services against real Postgres and Redis. One order produced log lines with the same trace_id in gateway, order-service and product-service, and moved the business metrics.
+- Next step: run on EKS (Terraform in the app repo, 2 x t3.medium) or a larger workstation, where the platform fits.
